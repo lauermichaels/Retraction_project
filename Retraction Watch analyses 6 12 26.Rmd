@@ -558,7 +558,9 @@ bg_nonnih_time_to_retraction <- paste0(
 
 
 ```
+# Abstract
 
+I present descriptive analyses of retractions of biomedical research publications funded and not funded by the National Institutes of Health (NIH). I identified 24.4 million papers published from 1981 to 2024, 2.6 million funded at least in part by the NIH. There were 21,319 retractions (0.09%). Retraction rates were higher for non-NIH funded papers (0.09% vs 0.06%) and a greater proportion of non-NIH retractions were linked to some form of investigator misconduct (86% vs 80%). NIH-funded papers were more likely to be retracted because of typical types of misconduct, like institutional findings, image duplication, and falsification or fabrication of data. Non-NIH funded papers were more likely to be retracted because of third-party concerns, such as journal-instigated investigations and paper mills, which were rarely seen with NIH-funded papers. Consistent with previous literature, most non-NIH funded retracted papers came from China. NIH-funded papers saw a much longer lagtime between publication and retraction (median times 2008 days versus 695 days for non-NIH funded papers). Secular trends differed as retraction rates for non-NIH funded papers increased in the 2010s and early 2020s, largely due to paper mill activities. Retraction rates for NIH-funded papers have declined since the early 2010s, but these findings should be interpreted with caution given the long lagtimes to retraction.  
 
 # Background
 
@@ -633,7 +635,7 @@ There was no external funding. The author is a former NIH official, but all work
 
 # Data and Code
 
-All data are publicly available. OPA data is at https://support.icite.nih.gov/hc/en-us/articles/9513563045787-Bulk-Data-and-API. NIH ExPORTER data is at https://reporter.nih.gov/exporter. The Retraction Watch database is at https://retractiondatabase.org/RetractionSearch.aspx?. The author will post R-markdown replication code in a public place.
+All data and code are publicly available. OPA data is at https://support.icite.nih.gov/hc/en-us/articles/9513563045787-Bulk-Data-and-API. NIH ExPORTER data is at https://reporter.nih.gov/exporter. The Retraction Watch database is at https://retractiondatabase.org/RetractionSearch.aspx?. I posted R-markdown replication code at https://github.com/lauermichaels/Retraction_project.
 
 \clearpage
 
