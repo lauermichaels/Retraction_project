@@ -3,7 +3,8 @@ title: "Publication Retractions Among Biomedical Research Publications Funded an
 author: |
   Michael S. Lauer\
   Silver Spring, Maryland\
-  Email: lauermichael@me.com
+  Email: lauermichael@me.com\
+  Conflict of Interest Disclosure: None
 date: "`r Sys.Date()`"
 output:
   pdf_document:
@@ -614,7 +615,7 @@ The reasons for retractions among American and Chinese papers largely reflected 
 
 Retraction patterns differ for NIH-funded and non-NIH funded papers. Retracted NIH-funded papers feature typical forms of scientific misconduct, whereas non-NIH funded retracted papers, which come mainly from China, feature third-party issues, including paper mills and peer review violations. The majority of retractions were due to some form of misconduct, but misconduct was more common among non-NIH funded retracted papers. 
 
-NIH-funded papers take much longer to retract, with the difference in retraction times between NIH- and non-NIH funded papers measured in _years_. The time differential likely reflects the different reasons for retraction, as scientific misconduct investigations and implementation of remedies typically take many years. Another source of delay stems from complex journal editorial processes as well as reluctance among some editors to draw attention to problematic papers.[@castillo2023correctionsretractions] 
+NIH-funded papers take much longer to retract, with the difference in retraction times between NIH- and non-NIH funded papers measured in _years_. The time differential likely reflects the different reasons for retraction, as scientific misconduct investigations and implementation of remedies typically take many years. Sometimes authors disagree with one another about whether to retract a paper. A prominent example is a 2006 _Nature_ paper on a brain amyloid protein. _Nature_ retracted the paper in 2024 two years after a news article in _Science_ raised concerns about inappropriate image manipulation.[@Lesne2024RetractionNote; @Piller2022Blots] Most of the authors agreed with the retraction, but Sylvain Lesné, the lead author, disagreed and, according to _Science_ "'vehemently denied' having doctored the images."[@Piller2025AlzheimersScientistResigns] Another source of delay stems from complex journal editorial processes as well as reluctance among some editors to draw attention to problematic papers.[@castillo2023correctionsretractions] 
 
 Over the past 10 to 15 years, there has been increasing concern about contamination of the scientific literature from papers produced by paper mills[@Candal-Pedreirae071517], defined by Parker et as "fraudulent organizations that make money by writing fake manuscripts and offering authorship slots for sale to academic customers."[@PARKER2024] The current analyses suggest that NIH-funded investigators have not materially used paper mills, at least not for papers that they link to NIH grants. Papers mills have emerged as a concerning source of fraudulent papers coming from China, which has increasingly recognized its research integrity problems.[@science_misconduct_sleuth_china; @Xu12042026]
 
