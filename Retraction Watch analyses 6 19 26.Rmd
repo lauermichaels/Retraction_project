@@ -84,7 +84,8 @@ opa_ %>%
 opa_use3<-open_dataset("opa_use.parquet") %>%
   mutate(doi=str_to_lower(doi)) %>%
   mutate(author_count_opa=str_count(authors, pattern = ",")+1) %>%
-  select(-authors) 
+  mutate(reference_count_opa=str_count(references, pattern = ",")+1) %>%
+  select(-authors, -references)
 
 opa_use3%>%
   write_parquet("opa_use3.parquet")
