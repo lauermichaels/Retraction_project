@@ -1,0 +1,2431 @@
+---
+title: "Publication Retractions Among Biomedical Research Publications Funded and Not Funded by the National Institutes of Health (NIH)"
+author: |
+  Michael S. Lauer\
+  Silver Spring, Maryland\
+  Email: lauermichael@me.com\
+  Conflict of Interest Disclosure: None
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    number_sections: false
+geometry: margin=1in
+urlcolor: blue
+linkcolor: blue
+bibliography: references.bib
+csl: pnas.csl
+link-citations: true
+header-includes:
+  - \usepackage{float}
+  - \usepackage{placeins}
+  - \usepackage{pdflscape}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.pos = "H"
+)
+
+library(DBI)
+library(duckdb)
+library(glue)
+library(dplyr)
+library(tibble)
+library(gt)
+library(scales)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+```
+
+```{r data_setup_not_run, eval=FALSE}
+
+# Data from the NIH Office of Portfolio Analysis, downloaded on 6/11/26
+# Data available at https://nih.figshare.com/collections/iCite_Database_Snapshots_NIH_Open_Citation_Collection_/4586573 
+
+# Read csv file
+
+opa_total <- read_csv_duckdb("icite_metadata.csv",
+                             options = list(ignore_errors = TRUE)) %>%
+  
+# Select needed variables and convert to parquet file
+  
+  select(pmid, doi, year, is_research_article, 
+         journal, human, animal, molecular_cellular, apt,
+         relative_citation_ratio, citation_count,
+         is_clinical, authors) %>% distinct()
+
+  opa_total %>% compute_parquet("opa_.parquet")
+  
+  # Merge with NIH PMIDs -- I generated a list of NIH PMIDs from ExPORTER (see appendix code below)
+  # This eliminates PMIDs that are linked to other sponsors like AHRQ, FDA, CDC, and VA
+  # It includes NIH intramural and extramural
+  # It includes all NIH PMIDs, including papers that OPA does not consider to be research articles
+  
+opa_ <- read_parquet_duckdb("opa_.parquet") %>%
+  compute(prudence = "lavish")
+nih_pmids <- read_parquet_duckdb("NIH_pmids_6_11_26.parquet") %>%
+  compute(prudence = "lavish")
+  
+opa_ %>%
+    left_join(nih_pmids, by = "pmid") %>%
+    distinct(pmid, .keep_all = TRUE) %>%
+    compute_parquet("opa_use.parquet")
+
+# To enable mergers with other data sets (for later analyses), convert doi to lower case
+# Count number of authors, then delete memory-using columns
+
+opa_use3<-open_dataset("opa_use.parquet") %>%
+  mutate(doi=str_to_lower(doi)) %>%
+  mutate(author_count_opa=str_count(authors, pattern = ",")+1) %>%
+  mutate(reference_count_opa=str_count(references, pattern = ",")+1) %>%
+  select(-authors, -references) 
+
+opa_use3%>%
+  write_parquet("opa_use3.parquet")
+
+#################################################################################
+
+## Set up working data set for retraction watch analyses
+
+#################################################################################
+
+# Data from retraction watch database obtained April 10, 2026
+
+retraction_watch <- read_csv("~/Library/CloudStorage/OneDrive-Personal/Retraction Watch/retraction_watch.csv") %>%
+  clean_names()
+
+# Identify pmid papers that have been retracted
+
+retracted_pmid_papers <- retraction_watch %>%
+  filter(retraction_nature=="Retraction") %>%
+    rename(pmid=original_paper_pub_med_id) %>%
+    filter(!is.na(pmid) & pmid>0) %>% 
+    select(pmid, country, original_paper_date, retraction_date, reason, article_type) %>%
+    mutate(retraction_watch_research_article=ifelse(str_detect(article_type, "Research Article"),1,0)) %>%
+    distinct()
+
+# Look at duplicates
+
+retracted_pmid_papers_duplicates <- retracted_pmid_papers %>%
+  group_by(pmid) %>%
+  filter(n() > 1) # 30 duplicates, 15 pairs
+
+# Try to eliminate duplicates by using first publication date and latest retraction date
+
+retracted_pmid_papers <- retraction_watch %>%
+  filter(retraction_nature=="Retraction") %>%
+  rename(pmid=original_paper_pub_med_id) %>%
+  filter(!is.na(pmid) & pmid>0) %>% 
+  select(pmid, country, original_paper_date, retraction_date, reason, article_type) %>%
+  mutate(retraction_watch_research_article=ifelse(str_detect(article_type, "Research Article"),1,0)) %>%
+  distinct() %>%
+  group_by(pmid) %>%
+    filter(original_paper_date == min(original_paper_date)) %>%
+    filter(retraction_date == max(retraction_date)) %>%
+  ungroup() %>% distinct()
+
+# Check on duplicates
+
+retracted_pmid_papers_duplicates <- retracted_pmid_papers %>%
+  group_by(pmid) %>%
+  filter(n() > 1) # 6 duplicates, 3 pairs
+
+# Keep first observation to eliminate these duplicates
+
+retracted_pmid_papers <- retraction_watch %>%
+  filter(retraction_nature=="Retraction") %>%
+  rename(pmid=original_paper_pub_med_id) %>%
+  filter(!is.na(pmid) & pmid>0) %>% 
+  select(pmid, country, original_paper_date, retraction_date, reason, article_type) %>%
+  mutate(retraction_watch_research_article=ifelse(str_detect(article_type, "Research Article"),1,0)) %>%
+  distinct() %>%
+  group_by(pmid) %>%
+  filter(original_paper_date == min(original_paper_date)) %>%
+  filter(retraction_date == max(retraction_date)) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>% distinct() %>%
+  mutate(retracted=1)
+
+
+# Identify pmid papers retracted due to some kind of misconduct
+
+misconduct_papers <- retraction_watch  %>%
+  filter(retraction_nature=="Retraction") %>%
+  filter(str_detect(reason, "Falsification|Fabrication|Plagiarism|Paper Mill|Faked Peer Review|Ethical Violations|Informed Consent|IRB|
+                    Concerns/Issues|Breach|Compromised|about Animal Welfare|about Human Subject Welfare|
+                    About Image|about Referencing|Criminal Proceedings|False/Forged Authorship|False/Forged Affiliation|
+                    Euphemisms|Hoax Paper|Patient Consent|Lack of|Manipulation|Misconduct|Rogue Editor|Sabotage|
+                    Salami|Taken|Issues about Data|Investigation|Issues about Image|Duplication")) %>%
+  
+# PMID numbers and limit to those with a pmid
+  
+  rename(pmid=original_paper_pub_med_id) %>%
+  filter(!is.na(pmid) & pmid>0) %>% 
+  select(pmid) %>%
+  distinct() %>%
+  mutate(retraction_due_to_misconduct=1)
+
+# put it together
+
+retracted_pmid_papers_use <- retracted_pmid_papers %>%
+  left_join(misconduct_papers) %>%
+  mutate(retraction_due_to_misconduct = coalesce(retraction_due_to_misconduct, 0))
+
+retracted_pmid_papers_use %>%
+  write_parquet("retracted_pmid_papers_use.parquet")
+
+# Merge this with main OPA data from above
+
+opa_data <- read_parquet("opa_use3.parquet")
+
+opa_data_use_with_retractions <- opa_data %>%
+  select(pmid, year, human, animal, molecular_cellular, funding_NIH, is_research_article,
+         citation_count, apt, relative_citation_ratio, is_clinical, author_count_opa, reference_count_opa) %>%
+  filter(year>=1981 & year <= 2024) %>%
+  filter(human>0 | animal > 0 | molecular_cellular > 0) %>% # Must have at least one human, animal, or mol_cell MeSH term
+  mutate(fundamental=ifelse(human==0,1,0)) %>%
+  mutate(human_focused=ifelse(human==1,1,0)) %>%
+  mutate(mixed=ifelse(human>0 & human<1,1,0)) %>%
+  left_join(retracted_pmid_papers_use) %>%
+  mutate(retracted = coalesce(retracted, 0)) %>%
+  mutate(retraction_watch_research_article = coalesce(retraction_watch_research_article, 0)) 
+  
+# Focus on research papers -- where either OPA calls is a research paper or retraction watch calls it a research paper
+# Analyses in Julius AI showed that meta data on research paper classification is problematic when papers are retracted, leading to
+# many misses
+  
+opa_data_use_with_retractions <- opa_data_use_with_retractions %>%
+  filter(is_research_article==TRUE | retraction_watch_research_article==1)
+
+opa_data_use_with_retractions %>%
+  write_parquet("opa_data_use_with_retractions.parquet")
+
+```
+
+
+
+```{r file-paths, include=FALSE}
+parquet_file <- "opa_data_use_with_retractions.parquet"
+```
+
+```{r duckdb-connection, include=FALSE}
+con <- dbConnect(duckdb::duckdb())
+
+parquet_sql <- as.character(DBI::dbQuoteString(con, parquet_file))
+```
+
+
+```{r create-reusable-duckdb-view, include=FALSE}
+dbExecute(
+  con,
+  glue("
+    CREATE OR REPLACE VIEW opa AS
+    SELECT
+      pmid,
+      year,
+      funding_NIH,
+      fundamental,
+      mixed,
+      human_focused,
+      is_clinical,
+      author_count_opa,
+      reference_count_opa,
+      citation_count,
+      apt,
+      relative_citation_ratio,
+      retracted,
+      retraction_due_to_misconduct
+    FROM read_parquet({parquet_sql})
+  ")
+)
+```
+
+```{r helper-functions, include=FALSE}
+fmt_pct_n <- function(pct, n, denom, accuracy = 0.01) {
+  paste0(
+    percent(pct, accuracy = accuracy),
+    " (",
+    comma(n),
+    "/",
+    comma(denom),
+    ")"
+  )
+}
+
+fmt_mean_sd <- function(mean, sd, accuracy = 0.01) {
+  paste0(
+    number(mean, accuracy = accuracy),
+    " (",
+    number(sd, accuracy = accuracy),
+    ")"
+  )
+}
+
+fmt_int <- function(x) {
+  comma(x)
+}
+```
+
+```{r global-derived-values, include=FALSE}
+rcr_95 <- dbGetQuery(
+  con,
+  "
+    SELECT
+      quantile_cont(relative_citation_ratio, 0.95) AS rcr_95
+    FROM opa
+    WHERE relative_citation_ratio IS NOT NULL
+  "
+)$rcr_95
+```
+
+```{r background-values, include=FALSE}
+background_counts <- dbGetQuery(
+  con,
+  "
+    SELECT
+      COUNT(*) AS total_papers,
+
+      SUM(
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) AS retracted_papers,
+
+      100.0 * SUM(
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) / COUNT(*) AS percent_retracted,
+
+      SUM(
+        CASE
+          WHEN funding_NIH = 1 THEN 1
+          ELSE 0
+        END
+      ) AS nih_funded_papers,
+
+      SUM(
+        CASE
+          WHEN funding_NIH = 1 AND retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) AS nih_funded_retracted_papers,
+
+      100.0 * SUM(
+        CASE
+          WHEN funding_NIH = 1 AND retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) / SUM(
+        CASE
+          WHEN funding_NIH = 1 THEN 1
+          ELSE 0
+        END
+      ) AS percent_nih_funded_retracted,
+
+      SUM(
+        CASE
+          WHEN funding_NIH = 1
+               AND retracted = 1
+               AND retraction_due_to_misconduct = 1
+          THEN 1
+          ELSE 0
+        END
+      ) AS nih_funded_misconduct_retractions,
+
+      100.0 * SUM(
+        CASE
+          WHEN funding_NIH = 1
+               AND retracted = 1
+               AND retraction_due_to_misconduct = 1
+          THEN 1
+          ELSE 0
+        END
+      ) / SUM(
+        CASE
+          WHEN funding_NIH = 1 and retracted=1 THEN 1
+          ELSE 0
+        END
+      ) AS percent_nih_funded_misconduct_retractions,
+
+      SUM(
+        CASE
+          WHEN funding_NIH IS NULL OR funding_NIH != 1 THEN 1
+          ELSE 0
+        END
+      ) AS nonnih_funded_papers,
+
+      SUM(
+        CASE
+          WHEN (funding_NIH IS NULL OR funding_NIH != 1)
+               AND retracted = 1
+          THEN 1
+          ELSE 0
+        END
+      ) AS nonnih_funded_retracted_papers,
+
+      100.0 * SUM(
+        CASE
+          WHEN (funding_NIH IS NULL OR funding_NIH != 1)
+               AND retracted = 1
+          THEN 1
+          ELSE 0
+        END
+      ) / SUM(
+        CASE
+          WHEN funding_NIH IS NULL OR funding_NIH != 1 THEN 1
+          ELSE 0
+        END
+      ) AS percent_nonnih_funded_retracted,
+
+      SUM(
+        CASE
+          WHEN (funding_NIH IS NULL OR funding_NIH != 1)
+               AND retracted = 1
+               AND retraction_due_to_misconduct = 1
+          THEN 1
+          ELSE 0
+        END
+      ) AS nonnih_funded_misconduct_retractions,
+
+      100.0 * SUM(
+        CASE
+          WHEN (funding_NIH IS NULL OR funding_NIH != 1)
+               AND retracted = 1
+               AND retraction_due_to_misconduct = 1
+          THEN 1
+          ELSE 0
+        END
+      ) / SUM(
+        CASE
+          WHEN (funding_NIH IS NULL OR funding_NIH != 1) and retracted=1 THEN 1
+          ELSE 0
+        END
+      ) AS percent_nonnih_funded_misconduct_retractions
+
+    FROM opa
+  "
+)
+
+bg_total_papers <- comma(background_counts$total_papers)
+bg_retracted_papers <- comma(background_counts$retracted_papers)
+bg_percent_retracted <- percent(
+  background_counts$percent_retracted / 100,
+  accuracy = 0.01
+)
+
+bg_nih_funded_papers <- comma(background_counts$nih_funded_papers)
+bg_nih_funded_retracted_papers <- comma(
+  background_counts$nih_funded_retracted_papers
+)
+bg_percent_nih_funded_retracted <- percent(
+  background_counts$percent_nih_funded_retracted / 100,
+  accuracy = 0.01
+)
+bg_nih_funded_misconduct_retractions <- comma(
+  background_counts$nih_funded_misconduct_retractions
+)
+bg_percent_nih_funded_misconduct_retractions <- percent(
+  background_counts$percent_nih_funded_misconduct_retractions / 100,
+  accuracy = 0.01
+)
+
+bg_nonnih_funded_papers <- comma(background_counts$nonnih_funded_papers)
+bg_nonnih_funded_retracted_papers <- comma(
+  background_counts$nonnih_funded_retracted_papers
+)
+bg_percent_nonnih_funded_retracted <- percent(
+  background_counts$percent_nonnih_funded_retracted / 100,
+  accuracy = 0.01
+)
+bg_nonnih_funded_misconduct_retractions <- comma(
+  background_counts$nonnih_funded_misconduct_retractions
+)
+bg_percent_nonnih_funded_misconduct_retractions <- percent(
+  background_counts$percent_nonnih_funded_misconduct_retractions / 100,
+  accuracy = 0.01
+)
+
+background_nih_paper_mill <- dbGetQuery(
+  con,
+  glue("
+    SELECT
+      COUNT(DISTINCT pmid) AS nih_funded_paper_mill_retractions,
+
+      100.0 * COUNT(DISTINCT pmid) / NULLIF(
+        (
+          SELECT COUNT(DISTINCT pmid)
+          FROM read_parquet({parquet_sql})
+          WHERE funding_NIH = 1
+            AND retracted = 1
+        ),
+        0
+      ) AS percent_nih_funded_paper_mill_retractions
+
+    FROM read_parquet({parquet_sql})
+
+    WHERE funding_NIH = 1
+      AND retracted = 1
+      AND reason IS NOT NULL
+      AND strpos(reason, 'Paper Mill') > 0
+  ")
+)
+
+bg_nih_funded_paper_mill_retractions <- comma(
+  background_nih_paper_mill$nih_funded_paper_mill_retractions
+)
+
+bg_percent_nih_funded_paper_mill_retractions <- percent(
+  background_nih_paper_mill$percent_nih_funded_paper_mill_retractions / 100,
+  accuracy = 0.01
+)
+
+background_time_to_retraction <- dbGetQuery(
+  con,
+  glue("
+    SELECT
+      CASE
+        WHEN funding_NIH = 1 THEN 'NIH funded'
+        ELSE 'Not NIH funded / missing NIH'
+      END AS nih_funding,
+
+      median(
+        date_diff(
+          'day',
+          strptime(original_paper_date, '%m/%d/%Y %H:%M'),
+          strptime(retraction_date, '%m/%d/%Y %H:%M')
+        )
+      ) AS median_days,
+
+      quantile_cont(
+        date_diff(
+          'day',
+          strptime(original_paper_date, '%m/%d/%Y %H:%M'),
+          strptime(retraction_date, '%m/%d/%Y %H:%M')
+        ),
+        0.25
+      ) AS q1_days,
+
+      quantile_cont(
+        date_diff(
+          'day',
+          strptime(original_paper_date, '%m/%d/%Y %H:%M'),
+          strptime(retraction_date, '%m/%d/%Y %H:%M')
+        ),
+        0.75
+      ) AS q3_days
+
+    FROM read_parquet({parquet_sql})
+
+    WHERE retracted = 1
+      AND original_paper_date IS NOT NULL
+      AND retraction_date IS NOT NULL
+
+    GROUP BY nih_funding
+  ")
+)
+
+bg_nih_time <- background_time_to_retraction %>%
+  filter(nih_funding == "NIH funded")
+
+bg_nonnih_time <- background_time_to_retraction %>%
+  filter(nih_funding == "Not NIH funded / missing NIH")
+
+bg_nih_time_to_retraction <- paste0(
+  comma(round(bg_nih_time$median_days, 0)),
+  " days (IQR ",
+  comma(round(bg_nih_time$q1_days, 0)),
+  "-",
+  comma(round(bg_nih_time$q3_days, 0)),
+  ")"
+)
+
+bg_nonnih_time_to_retraction <- paste0(
+  comma(round(bg_nonnih_time$median_days, 0)),
+  " days (IQR ",
+  comma(round(bg_nonnih_time$q1_days, 0)),
+  "-",
+  comma(round(bg_nonnih_time$q3_days, 0)),
+  ")"
+)
+
+
+```
+# Abstract
+
+I present descriptive analyses of retractions of biomedical research publications funded and not funded by the National Institutes of Health (NIH). I identified 24.4 million papers published from 1981 to 2024, 2.6 million funded at least in part by the NIH. There were 21,319 retractions (0.09%). Retraction rates were higher for non-NIH funded papers (0.09% vs 0.06%) and a greater proportion of non-NIH retractions were linked to some form of investigator misconduct (86% vs 80%). NIH-funded papers were more likely to be retracted because of typical types of misconduct, like institutional findings, image duplication, and falsification or fabrication of data. Non-NIH funded papers were more likely to be retracted because of third-party concerns, such as journal-instigated investigations and paper mills, which were rarely seen with NIH-funded papers. Consistent with previous literature, most non-NIH funded retracted papers came from China. NIH-funded papers saw a much longer lagtime between publication and retraction (median times 2008 days versus 695 days for non-NIH funded papers). Secular trends differed as retraction rates for non-NIH funded papers increased in the 2010s and early 2020s, largely due to paper mill activities. Retraction rates for NIH-funded papers have declined since the early 2010s, but these findings should be interpreted with caution given the long lagtimes to retraction.  
+
+# Background
+
+Publication retractions offer a window into scientific misconduct as most retractions are due to some kind of investigator misbehavior.[@fang2012misconduct; @MarcusOransky2014; @Brainard2018] To my knowledge, there has not been a recent assessment of retractions according to source of funding. Stern et al reported in 2012 that NIH-funded papers retracted for misconduct accounted for less than one percent of the NIH budget.[@stern2012misconduct]
+
+The Retraction Watch database, launched in 2018, provides accurate and detailed information on academic retractions, including reasons for retraction, time from publication to retraction, and country (countries) of origin.[@RetractionWatchDatabase] Investigators have used the database to conduct research on retractions and scientific misconduct.[@MarcusOransky2014; @Brainard2018; @Guadino_JAMA_2021] I leveraged the Retraction Watch database to describe reasons and trends in research article retractions according to source of funding.
+
+# Data and Methods
+
+The NIH Office of Portfolio Analysis (or OPA) iCite product regularly releases detailed data on all papers in Pubmed published after 1980.[@icite2019snapshots] OPA data includes the relative citation ratio (RCR) metric, which measures citation impact after accounting for field and year of publication.[@rcrarticle2016] OPA also categorizes papers by whether they have human, animal, and/or molecular/cellular MeSH terms.[@opatranslationarticle2019] Over 95% of NIH-funded papers have at least one such term. I downloaded the OPA database on June 11, 2026.
+
+The NIH Office of Extramural Research maintains NIH's ExPORTER website (see https://reporter.nih.gov/exporter), which includes yearly files that link publications to NIH awards. 
+
+Using the OPA database, I identified papers published between 1981 and 2024 that had at least one human, animal, or molecular/cellular MeSH term. As OPA has done, I classified papers with no human MeSH terms as describing fundamental science and those with only human MeSH terms as describing human-focused science.[@opatranslationarticle2019] Mixed science papers were those with human MeSH terms and at least one animal and/or molecular/cellular term. I merged the OPA database with data from NIH ExPORTER to identify which papers were at least partially funded by NIH. I took steps to assure correct classification of NIH-funded papers, since ExPORTER includes data on papers and awards that come from some non-NIH agencies (e.g., the Agency for Health Research and Quality and the US Department of Veterans Affairs).
+
+Using the Retraction Watch database (as downloaded on April 10, 2026), I identified papers that underwent retraction (i.e., not just expression of concern). I merged the resulting table with the OPA table and kept those papers which either OPA or Retraction Watch called a research article.
+
+I designated a retraction as due to misconduct if at least one of the reasons for retraction included fabrication, falsification, plagiarism; breaches of policy on the part of an author; concerns about data or images; violations related to peer review, animal welfare, human subject protections, or informed consent; or other reasons related to misbehavior, such as paper mills, forged authorship, or a hoax paper.
+
+I used Julius AI [@juliusai2026] for help in writing R-markdown code [@rmarkdown2024], but I did not use AI for writing manuscript text.
+
+# Results
+
+After inclusions and exclusions, my working data frame included `r bg_total_papers` research papers, of which `r bg_retracted_papers` were retracted (`r bg_percent_retracted`). Among the `r bg_nih_funded_papers` NIH-funded papers, `r bg_nih_funded_retracted_papers` (`r bg_percent_nih_funded_retracted`) were retracted; `r bg_nih_funded_misconduct_retractions` (`r bg_percent_nih_funded_misconduct_retractions`) were retracted due to some form of misconduct. Among the `r bg_nonnih_funded_papers` non-NIH-funded papers, `r bg_nonnih_funded_retracted_papers` (`r bg_percent_nonnih_funded_retracted`) were retracted; `r bg_nonnih_funded_misconduct_retractions` (`r bg_percent_nonnih_funded_misconduct_retractions`) were retracted due to some form misconduct. 
+
+## Comparison of Retracted and Non-Retracted Papers
+
+Retracted papers were less likely to be linked to NIH funding and were less likely to involve human-focused science or clinical studies (Table 1). They were less translational (that is, their Approximate Potential to Translate metric[@opatranslationarticle2019] was lower) and had lower citation impact as assessed by mean relative citation ratio or by having a relative citation ratio above the 95th percentile.  
+
+## Reasons for Retraction by NIH Funding Status
+
+Tables 2 and 3 show the most common reasons for retraction among retracted papers, separately for NIH-funded papers and non-NIH funded papers. It is important to note that the Retraction Watch database reasons are not mutually exclusive, so a single paper typically has multiple reasons for retraction. NIH-funded papers were more likely retracted due to typical scientific misconduct, like institutional findings, image duplication, and falsification or fabrication of data. Non-NIH-funded papers were more likely retracted because of third-party concerns, like journal-instigated investigations, peer review violations, and paper mills. Among NIH-funded retracted papers, only `r bg_nih_funded_paper_mill_retractions` (`r bg_percent_nih_funded_paper_mill_retractions`) had at least one listed retraction reason of "Paper Mill."
+
+There were also marked differences in time to retraction (Tables 2 and 3). Irrespective of reason, NIH-funded papers took much longer to retract. Among all retracted papers with available publication and retraction dates, the median time to retraction was `r bg_nih_time_to_retraction` for NIH-funded papers and `r bg_nonnih_time_to_retraction` for non-NIH-funded papers.
+
+Among papers retracted for non-misconduct reasons, common reasons for retraction included errors or unreliability. Time to retraction was relatively short for both NIH-funded and non-NIH funded papers (Tables 2a and 3a).
+
+## Retraction Rates over Time
+
+For papers published before the year 2000, retraction was a rare event irrespective of funding source (Figure 1). For papers published in the 2000s and 2010s, retraction rates increased, somewhat more among NIH-funded papers. For papers published since 2015, retraction rates increased dramatically for non-NIH funded papers, especially those published in 2022, likely due to exposures of paper mills and peer review fraud schemes. Retraction rates for NIH-funded papers declined, but interpretation of this observation requires caution given the long lag periods between publication and retraction for NIH-funded papers (Table 2).
+
+The trends were similar, though not as marked, even after excluding papers that were retracted because of paper mills (Figure 2).
+
+## Funding and Country of Origin for Retracted Papers.
+
+As expected, nearly all NIH-funded retracted papers originated in the United States, though nearly 9% had at least one link to China (Table 4). Among non-NIH funded papers, over sixty percent originated in China (Table 5), an observation consistent with prior literature.[@van_noorden_exclusive_2025] Note that countries are not mutually exclusive, so one paper may be linked to multiple countries.
+
+The reasons for retractions among American and Chinese papers largely reflected the differences in reasons for NIH-funded and non-NIH funded papers (Tables 6 and 7).
+
+# Discussion
+
+Retraction patterns differ for NIH-funded and non-NIH funded papers. Retracted NIH-funded papers feature typical forms of scientific misconduct, whereas non-NIH funded retracted papers, which come mainly from China, feature third-party issues, including paper mills and peer review violations. The majority of retractions were due to some form of misconduct, but misconduct was more common among non-NIH funded retracted papers. 
+
+NIH-funded papers take much longer to retract, with the difference in retraction times between NIH- and non-NIH funded papers measured in _years_. The time differential likely reflects the different reasons for retraction, as scientific misconduct investigations and implementation of remedies typically take many years. Sometimes authors disagree with one another about whether to retract a paper. A prominent example is a 2006 _Nature_ paper on a brain amyloid protein. _Nature_ retracted the paper in 2024 two years after a news article in _Science_ raised concerns about inappropriate image manipulation.[@Lesne2024RetractionNote; @Piller2022Blots] Most of the authors agreed with the retraction, but Sylvain Lesné, the lead author, disagreed and, according to _Science_ "'vehemently denied' having doctored the images."[@Piller2025AlzheimersScientistResigns] Another source of delay stems from complex journal editorial processes as well as reluctance among some editors to draw attention to problematic papers.[@castillo2023correctionsretractions] 
+
+Over the past 10 to 15 years, there has been increasing concern about contamination of the scientific literature from papers produced by paper mills[@Candal-Pedreirae071517], defined by Parker et as "fraudulent organizations that make money by writing fake manuscripts and offering authorship slots for sale to academic customers."[@PARKER2024] The current analyses suggest that NIH-funded investigators have not materially used paper mills, at least not for papers that they link to NIH grants. Papers mills have emerged as a concerning source of fraudulent papers coming from China, which has increasingly recognized its research integrity problems.[@science_misconduct_sleuth_china; @Xu12042026] The recent declines in retraction rates (Figures 1 and 2) may be related to increasing journal vigilance over papers mills and peer review frauds, as well as journals' routine use of specialized software to counteract plagiarism and image manipulation.[@Thorp_images_2024; @Zimba2021]
+
+My analyses extend on previous analyses of NIH-linked retractions. Stern et al focused on investigators censured by the US Department of Health and Human Services Office of Research Integrity (ORI) and found that affected investigators saw marked declines in research funding and publication productivity.[@stern2012misconduct] Peterson et al focused on retraction notices for 137 NIH-funded articles published between 2019 and 2023. They found that the most common reasons for retraction were data integrity and problems with images and figures.[@Peterson02102025] One of the key strengths of the Retraction Watch database is its careful characterization of retraction reasons, reasons that go beyond what is stated in retraction notices.[@Candal-Pedreirae071517]
+
+An important limitation of these analyses is the absence of data on detailed timelines. Retractions often involve messy, complex, and expensive series of events, ranging from nascent allegations through inquiries, investigations, appeals, litigation, and extensive communications between affected parties. I characterized funding as NIH or not NIH, but did not analyze outcomes according to other large funders, like the National Natural Science Foundation of China. Another limitation is that retractions are extreme events and may only reflect a fraction of misconduct. Surveys of scientists and careful assessments of published papers indicate that the true prevalence of misconduct substantially exceeds retraction rates.[@fanelli_how_2009; @Bik_mBio] 
+
+Despite these limitations, the current analyses offer insights into the nature of retractions according to source of funding and country of origin. Because of the long time lags between publication and retraction for NIH-funded studies, seeming declines in retraction rates should be interpreted with caution. We are fortunate to have robust data on biomedical publications and on retractions, but more routinely collected data would help policy makers better understand real-time trends in research integrity and better address integrity breaches in a timely manner.[@Lauer_Barnes_Science_editorial]
+
+# References
+
+::: {#refs}
+:::
+
+# Funding
+
+There was no external funding. The author is a former NIH official, but all work was conducted after he left federal service and used only publicly available resources.
+
+# Data and Code
+
+All data and code are publicly available. OPA data is at https://support.icite.nih.gov/hc/en-us/articles/9513563045787-Bulk-Data-and-API. NIH ExPORTER data is at https://reporter.nih.gov/exporter. The Retraction Watch database is at https://retractiondatabase.org/RetractionSearch.aspx?. I posted R-markdown replication code at https://github.com/lauermichaels/Retraction_project.
+
+\clearpage
+
+
+```{r table-1-data, include=FALSE}
+table_1_summary <- dbGetQuery(
+  con,
+  glue("
+    WITH base AS (
+      SELECT
+        CASE
+          WHEN retracted = 1 THEN 'Retracted'
+          ELSE 'Non-retracted'
+        END AS group_label,
+
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 2
+        END AS group_order,
+
+        CASE WHEN funding_NIH = 1 THEN 1 ELSE 0 END AS nih_funding,
+        CASE WHEN fundamental = 1 THEN 1 ELSE 0 END AS fundamental,
+        CASE WHEN mixed = 1 THEN 1 ELSE 0 END AS mixed,
+        CASE WHEN human_focused = 1 THEN 1 ELSE 0 END AS human_focused,
+        CASE WHEN is_clinical = 1 THEN 1 ELSE 0 END AS clinical,
+
+        author_count_opa AS author_count,
+        apt,
+        citation_count,
+        relative_citation_ratio AS rcr,
+
+        CASE
+          WHEN relative_citation_ratio IS NOT NULL
+               AND relative_citation_ratio >= 3.45
+          THEN 1
+          ELSE 0
+        END AS highly_cited,
+
+        CASE
+          WHEN relative_citation_ratio IS NOT NULL THEN 1
+          ELSE 0
+        END AS rcr_nonmissing
+
+      FROM opa
+    )
+
+    SELECT
+      group_label,
+      group_order,
+
+      COUNT(*) AS n_papers,
+
+      SUM(nih_funding) AS nih_funding_n,
+      AVG(nih_funding) AS nih_funding_pct,
+
+      SUM(fundamental) AS fundamental_n,
+      AVG(fundamental) AS fundamental_pct,
+
+      SUM(mixed) AS mixed_n,
+      AVG(mixed) AS mixed_pct,
+
+      SUM(human_focused) AS human_focused_n,
+      AVG(human_focused) AS human_focused_pct,
+
+      SUM(clinical) AS clinical_n,
+      AVG(clinical) AS clinical_pct,
+
+      AVG(author_count) AS author_count_mean,
+      STDDEV_SAMP(author_count) AS author_count_sd,
+
+      AVG(apt) AS apt_mean,
+      STDDEV_SAMP(apt) AS apt_sd,
+
+      AVG(citation_count) AS citation_count_mean,
+      STDDEV_SAMP(citation_count) AS citation_count_sd,
+
+      AVG(rcr) AS rcr_mean,
+      STDDEV_SAMP(rcr) AS rcr_sd,
+      COUNT(rcr) AS rcr_n,
+
+      SUM(highly_cited) AS highly_cited_n,
+      SUM(rcr_nonmissing) AS highly_cited_denom,
+      CAST(SUM(highly_cited) AS DOUBLE) / SUM(rcr_nonmissing) AS highly_cited_pct
+
+    FROM base
+    GROUP BY group_label, group_order
+    ORDER BY group_order
+  ")
+)
+```
+
+```{r table-1-format-data, include=FALSE}
+table_1_retracted <- table_1_summary %>%
+  filter(group_label == "Retracted")
+
+table_1_nonretracted <- table_1_summary %>%
+  filter(group_label == "Non-retracted")
+
+table_1_display <- tibble(
+  Variable = c(
+    "N papers",
+    "NIH funding",
+    "Type of science - Fundamental",
+    "Type of science - Mixed",
+    "Type of science - Human-focused",
+    "Clinical Study",
+    "Author count, mean (SD)",
+    "Approximate Potential to Translate, mean (SD)",
+    "Number of citations, mean (SD)",
+    "Relative citation ratio, mean (SD)",
+    "Highly-cited (RCR at least 3.45)"
+  ),
+
+  Retracted = c(
+    fmt_int(table_1_retracted$n_papers),
+    fmt_pct_n(table_1_retracted$nih_funding_pct, table_1_retracted$nih_funding_n, table_1_retracted$n_papers),
+    fmt_pct_n(table_1_retracted$fundamental_pct, table_1_retracted$fundamental_n, table_1_retracted$n_papers),
+    fmt_pct_n(table_1_retracted$mixed_pct, table_1_retracted$mixed_n, table_1_retracted$n_papers),
+    fmt_pct_n(table_1_retracted$human_focused_pct, table_1_retracted$human_focused_n, table_1_retracted$n_papers),
+    fmt_pct_n(table_1_retracted$clinical_pct, table_1_retracted$clinical_n, table_1_retracted$n_papers),
+    fmt_mean_sd(table_1_retracted$author_count_mean, table_1_retracted$author_count_sd),
+    fmt_mean_sd(table_1_retracted$apt_mean, table_1_retracted$apt_sd),
+    fmt_mean_sd(table_1_retracted$citation_count_mean, table_1_retracted$citation_count_sd),
+    fmt_mean_sd(table_1_retracted$rcr_mean, table_1_retracted$rcr_sd),
+    fmt_pct_n(
+      table_1_retracted$highly_cited_pct,
+      table_1_retracted$highly_cited_n,
+      table_1_retracted$highly_cited_denom
+    )
+  ),
+
+  `Non-retracted` = c(
+    fmt_int(table_1_nonretracted$n_papers),
+    fmt_pct_n(table_1_nonretracted$nih_funding_pct, table_1_nonretracted$nih_funding_n, table_1_nonretracted$n_papers),
+    fmt_pct_n(table_1_nonretracted$fundamental_pct, table_1_nonretracted$fundamental_n, table_1_nonretracted$n_papers),
+    fmt_pct_n(table_1_nonretracted$mixed_pct, table_1_nonretracted$mixed_n, table_1_nonretracted$n_papers),
+    fmt_pct_n(table_1_nonretracted$human_focused_pct, table_1_nonretracted$human_focused_n, table_1_nonretracted$n_papers),
+    fmt_pct_n(table_1_nonretracted$clinical_pct, table_1_nonretracted$clinical_n, table_1_nonretracted$n_papers),
+    fmt_mean_sd(table_1_nonretracted$author_count_mean, table_1_nonretracted$author_count_sd),
+    fmt_mean_sd(table_1_nonretracted$apt_mean, table_1_nonretracted$apt_sd),
+    fmt_mean_sd(table_1_nonretracted$citation_count_mean, table_1_nonretracted$citation_count_sd),
+    fmt_mean_sd(table_1_nonretracted$rcr_mean, table_1_nonretracted$rcr_sd),
+    fmt_pct_n(
+      table_1_nonretracted$highly_cited_pct,
+      table_1_nonretracted$highly_cited_n,
+      table_1_nonretracted$highly_cited_denom
+    )
+  )
+)
+```
+
+
+```{r table-1-render}
+table_1_display %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 1: Comparison of Retracted and Non-Retracted Papers**"),
+    subtitle = md(
+        "Highly-cited is defined as non-missing relative citation ratio (RCR) at or above 95th percentile for all publications as reported by the NIH Office of Portfolio Analysis (https://icite.od.nih.gov/globalrcrstats)"
+    )
+  ) %>%
+  tab_spanner(
+    label = "Retraction status",
+    columns = c(Retracted, `Non-retracted`)
+  ) %>%
+  cols_label(
+    Variable = "Variable",
+    Retracted = "Retracted",
+    `Non-retracted` = "Non-retracted"
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = Variable
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(Retracted, `Non-retracted`)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      columns = Variable,
+      rows = Variable == "N papers"
+    )
+  ) %>%
+  tab_options(
+    table.font.size = px(9),
+    heading.title.font.size = px(12),
+    heading.subtitle.font.size = px(9),
+    column_labels.font.weight = "bold",
+    data_row.padding = px(3),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "Categorical variables are shown as percent (n/N). Continuous variables are shown as mean (SD). The denominator for highly-cited includes only papers with non-missing relative citation ratio."
+    )
+  )
+```
+
+
+```{r retraction-reasons-data, include=FALSE}
+retraction_reason_raw <- dbGetQuery(
+  con,
+  glue("
+    SELECT
+      pmid,
+      funding_NIH,
+      reason,
+      original_paper_date,
+      retraction_date
+    FROM read_parquet({parquet_sql})
+    WHERE retracted = 1
+  ")
+)
+
+retraction_reasons_long <- retraction_reason_raw %>%
+  mutate(
+    nih_funding = if_else(
+      !is.na(funding_NIH) & funding_NIH == 1,
+      "NIH funded",
+      "Not NIH funded / missing NIH"
+    ),
+
+    original_date = mdy_hm(original_paper_date),
+    retraction_date_clean = mdy_hm(retraction_date),
+
+    time_to_retraction_days = as.numeric(
+      difftime(
+        retraction_date_clean,
+        original_date,
+        units = "days"
+      )
+    )
+  ) %>%
+  select(
+    pmid,
+    nih_funding,
+    reason,
+    time_to_retraction_days
+  ) %>%
+  separate_rows(reason, sep = ";") %>%
+  mutate(
+    reason = str_squish(reason)
+  ) %>%
+  filter(
+    !is.na(reason),
+    reason != ""
+  ) %>%
+  distinct(
+    pmid,
+    nih_funding,
+    reason,
+    .keep_all = TRUE
+  )
+
+retracted_denominators <- retraction_reason_raw %>%
+  mutate(
+    nih_funding = if_else(
+      !is.na(funding_NIH) & funding_NIH == 1,
+      "NIH funded",
+      "Not NIH funded / missing NIH"
+    )
+  ) %>%
+  group_by(nih_funding) %>%
+  summarise(
+    retracted_papers = n_distinct(pmid),
+    .groups = "drop"
+  )
+
+reason_summary <- retraction_reasons_long %>%
+  group_by(nih_funding, reason) %>%
+  summarise(
+    papers = n_distinct(pmid),
+    median_days = median(time_to_retraction_days, na.rm = TRUE),
+    q1_days = quantile(time_to_retraction_days, 0.25, na.rm = TRUE),
+    q3_days = quantile(time_to_retraction_days, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    retracted_denominators,
+    by = "nih_funding"
+  ) %>%
+  mutate(
+    percent_retracted_papers = 100 * papers / retracted_papers,
+    time_to_retraction_iqr = paste0(
+      comma(round(median_days, 0)),
+      " (",
+      comma(round(q1_days, 0)),
+      "-",
+      comma(round(q3_days, 0)),
+      ")"
+    )
+  )
+```
+
+```{r nih-retraction-reasons-format, include=FALSE}
+nih_reason_table_data <- reason_summary %>%
+  filter(nih_funding == "NIH funded") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_retracted_papers,
+    time_to_retraction_iqr
+  )
+```
+
+\clearpage
+
+```{r nih-retraction-reasons-render}
+nih_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 2: Most common reasons for and time to retraction among NIH-funded papers**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted",
+    time_to_retraction_iqr = "Median days (IQR)"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(200),
+    papers ~ px(55),
+    percent_retracted_papers ~ px(75),
+    time_to_retraction_iqr ~ px(115)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers, time_to_retraction_iqr)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "nowrap"),
+    locations = cells_body(
+      columns = time_to_retraction_iqr
+    )
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses NIH-funded retracted papers as the denominator. Time to retraction is shown as median days (IQR)."
+    )
+  )
+```
+
+
+```{r nonnih-retraction-reasons-format, include=FALSE}
+nonnih_reason_table_data <- reason_summary %>%
+  filter(nih_funding == "Not NIH funded / missing NIH") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_retracted_papers,
+    time_to_retraction_iqr
+  )
+```
+
+
+
+```{r nonnih-retraction-reasons-render}
+nonnih_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 3: Most common reasons for and time to retraction among non-NIH-funded papers**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted",
+    time_to_retraction_iqr = "Median days (IQR)"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(200),
+    papers ~ px(55),
+    percent_retracted_papers ~ px(75),
+    time_to_retraction_iqr ~ px(115)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers, time_to_retraction_iqr)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "nowrap"),
+    locations = cells_body(
+      columns = time_to_retraction_iqr
+    )
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses non-NIH-funded retracted papers as the denominator. Time to retraction is shown as median days (IQR)."
+    )
+  )
+```
+
+
+```{r nonmisconduct-retraction-reasons-data, include=FALSE}
+nonmisconduct_retraction_reason_raw <- dbGetQuery(
+  con,
+  glue("
+    SELECT
+      pmid,
+      funding_NIH,
+      reason,
+      original_paper_date,
+      retraction_date,
+      retraction_due_to_misconduct
+    FROM read_parquet({parquet_sql})
+    WHERE retracted = 1
+      AND COALESCE(retraction_due_to_misconduct, 0) = 0
+  ")
+)
+
+nonmisconduct_retraction_reasons_long <- nonmisconduct_retraction_reason_raw %>%
+  mutate(
+    nih_funding = if_else(
+      !is.na(funding_NIH) & funding_NIH == 1,
+      "NIH funded",
+      "Not NIH funded / missing NIH"
+    ),
+
+    original_date = mdy_hm(original_paper_date),
+    retraction_date_clean = mdy_hm(retraction_date),
+
+    time_to_retraction_days = as.numeric(
+      difftime(
+        retraction_date_clean,
+        original_date,
+        units = "days"
+      )
+    )
+  ) %>%
+  select(
+    pmid,
+    nih_funding,
+    reason,
+    time_to_retraction_days
+  ) %>%
+  separate_rows(reason, sep = ";") %>%
+  mutate(
+    reason = str_squish(reason)
+  ) %>%
+  filter(
+    !is.na(reason),
+    reason != ""
+  ) %>%
+  distinct(
+    pmid,
+    nih_funding,
+    reason,
+    .keep_all = TRUE
+  )
+
+nonmisconduct_retracted_denominators <- nonmisconduct_retraction_reason_raw %>%
+  mutate(
+    nih_funding = if_else(
+      !is.na(funding_NIH) & funding_NIH == 1,
+      "NIH funded",
+      "Not NIH funded / missing NIH"
+    )
+  ) %>%
+  group_by(nih_funding) %>%
+  summarise(
+    retracted_papers = n_distinct(pmid),
+    .groups = "drop"
+  )
+
+nonmisconduct_reason_summary <- nonmisconduct_retraction_reasons_long %>%
+  group_by(nih_funding, reason) %>%
+  summarise(
+    papers = n_distinct(pmid),
+    median_days = median(time_to_retraction_days, na.rm = TRUE),
+    q1_days = quantile(time_to_retraction_days, 0.25, na.rm = TRUE),
+    q3_days = quantile(time_to_retraction_days, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    nonmisconduct_retracted_denominators,
+    by = "nih_funding"
+  ) %>%
+  mutate(
+    percent_retracted_papers = 100 * papers / retracted_papers,
+    time_to_retraction_iqr = paste0(
+      comma(round(median_days, 0)),
+      " (",
+      comma(round(q1_days, 0)),
+      "-",
+      comma(round(q3_days, 0)),
+      ")"
+    )
+  )
+```
+
+```{r nih-nonmisconduct-retraction-reasons-format, include=FALSE}
+nih_nonmisconduct_reason_table_data <- nonmisconduct_reason_summary %>%
+  filter(nih_funding == "NIH funded") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_retracted_papers,
+    time_to_retraction_iqr
+  )
+```
+
+
+```{r nih-nonmisconduct-retraction-reasons-render}
+nih_nonmisconduct_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 2a: Most common reasons for and time to retraction among NIH-funded papers not retracted due to misconduct**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted",
+    time_to_retraction_iqr = "Median days (IQR)"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(200),
+    papers ~ px(55),
+    percent_retracted_papers ~ px(75),
+    time_to_retraction_iqr ~ px(115)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers, time_to_retraction_iqr)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "nowrap"),
+    locations = cells_body(
+      columns = time_to_retraction_iqr
+    )
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses NIH-funded retracted papers not classified as misconduct retractions as the denominator. Time to retraction is shown as median days (IQR)."
+    )
+  )
+```
+
+```{r nonnih-nonmisconduct-retraction-reasons-format, include=FALSE}
+nonnih_nonmisconduct_reason_table_data <- nonmisconduct_reason_summary %>%
+  filter(nih_funding == "Not NIH funded / missing NIH") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_retracted_papers,
+    time_to_retraction_iqr
+  )
+```
+
+
+```{r nonnih-nonmisconduct-retraction-reasons-render}
+nonnih_nonmisconduct_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 3a: Most common reasons for and time to retraction among non-NIH-funded papers not retracted due to misconduct**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted",
+    time_to_retraction_iqr = "Median days (IQR)"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(200),
+    papers ~ px(55),
+    percent_retracted_papers ~ px(75),
+    time_to_retraction_iqr ~ px(115)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers, time_to_retraction_iqr)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "nowrap"),
+    locations = cells_body(
+      columns = time_to_retraction_iqr
+    )
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses non-NIH-funded retracted papers not classified as misconduct retractions as the denominator. Time to retraction is shown as median days (IQR)."
+    )
+  )
+```
+
+
+```{r figure-retraction-by-year-data, include=FALSE}
+year_retraction_plot_df <- dbGetQuery(
+  con,
+  "
+    SELECT
+      CAST(year AS INTEGER) AS publication_year,
+
+      CASE
+        WHEN funding_NIH = 1 THEN 'NIH funded'
+        ELSE 'Not NIH funded'
+      END AS nih_funding,
+
+      COUNT(*) AS papers,
+
+      SUM(
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) AS retracted_papers,
+
+      100.0 * SUM(
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 0
+        END
+      ) / COUNT(*) AS percent_retracted
+
+    FROM opa
+    WHERE year IS NOT NULL
+    GROUP BY
+      publication_year,
+      nih_funding
+    ORDER BY
+      publication_year,
+      nih_funding
+  "
+)
+```
+
+\clearpage
+
+```{r figure-retraction-by-year-render, fig.width=7.2, fig.height=4.6}
+p_retraction_by_year <- ggplot(
+  year_retraction_plot_df,
+  aes(
+    x = publication_year,
+    y = percent_retracted,
+    color = nih_funding,
+    group = nih_funding
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.8, alpha = 0.85) +
+  scale_color_manual(
+    values = c(
+      "NIH funded" = "#2C7FB8",
+      "Not NIH funded" = "#F28E2B"
+    )
+  ) +
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(year_retraction_plot_df$publication_year - 1, na.rm = TRUE),
+      max(year_retraction_plot_df$publication_year, na.rm = TRUE),
+      by = 5
+    )
+  ) +
+  labs(
+    title = "Figure 1: Percent of papers retracted by publication year",
+    subtitle = "Retraction percentage calculated within publication year and NIH funding group",
+    x = "Publication year",
+    y = "Percent ultimately retracted",
+    color = "",
+    caption = "Note: Recent publication years have less follow-up time for retractions to occur."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray30"),
+    plot.caption = element_text(size = 9, color = "gray40"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_retraction_by_year
+```
+
+
+```{r figure-retraction-by-year-no-papermill-data, include=FALSE}
+year_retraction_no_papermill_df <- dbGetQuery(
+  con,
+  glue("
+    WITH base AS (
+      SELECT
+        CAST(year AS INTEGER) AS publication_year,
+
+        CASE
+          WHEN funding_NIH = 1 THEN 'NIH funded'
+          ELSE 'Not NIH funded'
+        END AS nih_funding,
+
+        CASE
+          WHEN retracted = 1 THEN 1
+          ELSE 0
+        END AS retracted_flag,
+
+        CASE
+          WHEN retracted = 1
+               AND reason IS NOT NULL
+               AND strpos(reason, 'Paper Mill') > 0
+          THEN 1
+          ELSE 0
+        END AS paper_mill_retraction
+
+      FROM read_parquet({parquet_sql})
+    )
+
+    SELECT
+      publication_year,
+      nih_funding,
+      COUNT(*) AS papers_in_denominator,
+      SUM(retracted_flag) AS non_paper_mill_retractions,
+      100.0 * SUM(retracted_flag) / COUNT(*) AS percent_retracted
+
+    FROM base
+    WHERE publication_year IS NOT NULL
+      AND paper_mill_retraction = 0
+
+    GROUP BY
+      publication_year,
+      nih_funding
+
+    ORDER BY
+      publication_year,
+      nih_funding
+  ")
+)
+```
+
+\clearpage
+
+```{r figure-retraction-by-year-no-papermill-render, fig.width=7.2, fig.height=4.6}
+p_retraction_by_year_no_papermill <- ggplot(
+  year_retraction_no_papermill_df,
+  aes(
+    x = publication_year,
+    y = percent_retracted,
+    color = nih_funding,
+    group = nih_funding
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.8, alpha = 0.85) +
+  scale_color_manual(
+    values = c(
+      "NIH funded" = "#2C7FB8",
+      "Not NIH funded" = "#F28E2B"
+    )
+  ) +
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(year_retraction_no_papermill_df$publication_year - 1, na.rm = TRUE),
+      max(year_retraction_no_papermill_df$publication_year, na.rm = TRUE),
+      by = 5
+    )
+  ) +
+  labs(
+    title = "Figure 2: Percent of papers retracted by publication year",
+    subtitle = "Excluding papers retracted for paper mills",
+    x = "Publication year",
+    y = "Percent ultimately retracted",
+    color = "",
+    caption = "Note: Recent publication years have less follow-up time for retractions to occur."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray30"),
+    plot.caption = element_text(size = 9, color = "gray40"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_retraction_by_year_no_papermill
+```
+
+```{r country-tables-data, include=FALSE}
+retracted_country_raw <- dbGetQuery(
+  con,
+  glue("
+    SELECT
+      pmid,
+      funding_NIH,
+      country,
+      reason
+    FROM read_parquet({parquet_sql})
+    WHERE retracted = 1
+  ")
+)
+
+retracted_country_df <- retracted_country_raw %>%
+  mutate(
+    nih_funding = if_else(
+      !is.na(funding_NIH) & funding_NIH == 1,
+      "NIH funded",
+      "Not NIH funded / missing NIH"
+    )
+  )
+
+country_long <- retracted_country_df %>%
+  select(
+    pmid,
+    nih_funding,
+    country
+  ) %>%
+  separate_rows(country, sep = ";") %>%
+  mutate(
+    country = str_squish(country)
+  ) %>%
+  filter(
+    !is.na(country),
+    country != ""
+  ) %>%
+  distinct(
+    pmid,
+    nih_funding,
+    country
+  )
+
+country_denominators <- retracted_country_df %>%
+  group_by(nih_funding) %>%
+  summarise(
+    retracted_papers = n_distinct(pmid),
+    .groups = "drop"
+  )
+
+country_summary <- country_long %>%
+  group_by(nih_funding, country) %>%
+  summarise(
+    papers = n_distinct(pmid),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    country_denominators,
+    by = "nih_funding"
+  ) %>%
+  mutate(
+    percent_retracted_papers = 100 * papers / retracted_papers
+  )
+```
+
+```{r nih-country-table-format, include=FALSE}
+nih_country_table_data <- country_summary %>%
+  filter(nih_funding == "NIH funded") %>%
+  arrange(desc(papers), country) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    country = str_wrap(country, width = 32)
+  ) %>%
+  select(
+    rank,
+    country,
+    papers,
+    percent_retracted_papers
+  )
+```
+
+\clearpage
+
+```{r nih-country-table-render}
+nih_country_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 4: Most common countries among NIH-funded retracted papers**"),
+    subtitle = md("*Countries are not mutually exclusive; one paper can be linked to multiple countries.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    country = "Country",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    country ~ px(230),
+    papers ~ px(65),
+    percent_retracted_papers ~ px(85)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = country
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses NIH-funded retracted papers as the denominator."
+    )
+  )
+```
+
+```{r nonnih-country-table-format, include=FALSE}
+nonnih_country_table_data <- country_summary %>%
+  filter(nih_funding == "Not NIH funded / missing NIH") %>%
+  arrange(desc(papers), country) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    country = str_wrap(country, width = 32)
+  ) %>%
+  select(
+    rank,
+    country,
+    papers,
+    percent_retracted_papers
+  )
+```
+
+
+```{r nonnih-country-table-render}
+nonnih_country_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 5: Most common countries among non-NIH-funded retracted papers**"),
+    subtitle = md("*Countries are not mutually exclusive; one paper can be linked to multiple countries.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    country = "Country",
+    papers = "Papers",
+    percent_retracted_papers = "% retracted"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_retracted_papers,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    country ~ px(230),
+    papers ~ px(65),
+    percent_retracted_papers ~ px(85)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = country
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_retracted_papers)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses non-NIH-funded retracted papers as the denominator."
+    )
+  )
+```
+
+```{r country-reason-tables-data, include=FALSE}
+country_reason_long <- retracted_country_df %>%
+  select(
+    pmid,
+    country,
+    reason
+  ) %>%
+  separate_rows(country, sep = ";") %>%
+  mutate(
+    country = str_squish(country)
+  ) %>%
+  filter(
+    country %in% c("China", "United States")
+  ) %>%
+  separate_rows(reason, sep = ";") %>%
+  mutate(
+    reason = str_squish(reason)
+  ) %>%
+  filter(
+    !is.na(reason),
+    reason != ""
+  ) %>%
+  distinct(
+    pmid,
+    country,
+    reason
+  )
+
+country_reason_denominators <- retracted_country_df %>%
+  select(
+    pmid,
+    country
+  ) %>%
+  separate_rows(country, sep = ";") %>%
+  mutate(
+    country = str_squish(country)
+  ) %>%
+  filter(
+    country %in% c("China", "United States")
+  ) %>%
+  distinct(
+    pmid,
+    country
+  ) %>%
+  group_by(country) %>%
+  summarise(
+    retracted_papers = n_distinct(pmid),
+    .groups = "drop"
+  )
+
+country_reason_summary <- country_reason_long %>%
+  group_by(country, reason) %>%
+  summarise(
+    papers = n_distinct(pmid),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    country_reason_denominators,
+    by = "country"
+  ) %>%
+  mutate(
+    percent_country_retractions = 100 * papers / retracted_papers
+  )
+```
+
+```{r us-reason-table-format, include=FALSE}
+us_reason_table_data <- country_reason_summary %>%
+  filter(country == "United States") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_country_retractions
+  )
+```
+
+\clearpage
+
+```{r us-reason-table-render}
+us_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 6: Most common reasons for retraction among United States-associated papers**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_country_retractions = "% retracted"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_country_retractions,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_country_retractions)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(230),
+    papers ~ px(65),
+    percent_country_retractions ~ px(85)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_country_retractions)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses United States-associated retracted papers as the denominator."
+    )
+  )
+```
+
+
+```{r china-reason-table-format, include=FALSE}
+china_reason_table_data <- country_reason_summary %>%
+  filter(country == "China") %>%
+  arrange(desc(papers), reason) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    rank = row_number(),
+    reason = str_wrap(reason, width = 38)
+  ) %>%
+  select(
+    rank,
+    reason,
+    papers,
+    percent_country_retractions
+  )
+```
+
+
+```{r china-reason-table-render}
+china_reason_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 7: Most common reasons for retraction among China-associated papers**"),
+    subtitle = md("*Reasons are not mutually exclusive; one paper can have multiple reasons.*")
+  ) %>%
+  cols_label(
+    rank = "Rank",
+    reason = "Retraction reason",
+    papers = "Papers",
+    percent_country_retractions = "% retracted"
+  ) %>%
+  fmt_integer(
+    columns = papers
+  ) %>%
+  fmt_number(
+    columns = percent_country_retractions,
+    decimals = 1
+  ) %>%
+  tab_spanner(
+    label = "Frequency",
+    columns = c(papers, percent_country_retractions)
+  ) %>%
+  cols_width(
+    rank ~ px(35),
+    reason ~ px(230),
+    papers ~ px(65),
+    percent_country_retractions ~ px(85)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = rank
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = reason
+  ) %>%
+  cols_align(
+    align = "right",
+    columns = c(papers, percent_country_retractions)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_options(
+    table.font.size = px(8),
+    heading.title.font.size = px(11),
+    heading.subtitle.font.size = px(8),
+    data_row.padding = px(2),
+    column_labels.padding = px(2),
+    table.width = pct(100),
+    latex.use_longtable = FALSE,
+    latex.tbl.pos = "H"
+  ) %>%
+  tab_source_note(
+    source_note = md(
+      "% retracted uses China-associated retracted papers as the denominator."
+    )
+  )
+```
+
+```{r appendix_nih_pmids_not_run, eval=FALSE}
+
+########################################################################################
+
+## Appendix: Code to generate NIH-funded PMIDs
+
+########################################################################################
+
+# Identify NIH intramural and extramural projects
+
+# Import ExPORTER files and keep needed fields
+
+RePORTER_PRJ_C_FY1985 <- read_csv("RePORTER_PRJ_C_FY1985.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1986 <- read_csv("RePORTER_PRJ_C_FY1986.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1987 <- read_csv("RePORTER_PRJ_C_FY1987.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1988 <- read_csv("RePORTER_PRJ_C_FY1988.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1989 <- read_csv("RePORTER_PRJ_C_FY1989.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1990 <- read_csv("RePORTER_PRJ_C_FY1990.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1991 <- read_csv("RePORTER_PRJ_C_FY1991.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1992 <- read_csv("RePORTER_PRJ_C_FY1992.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1993 <- read_csv("RePORTER_PRJ_C_FY1993.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1994 <- read_csv("RePORTER_PRJ_C_FY1994.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1995 <- read_csv("RePORTER_PRJ_C_FY1995.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1996 <- read_csv("RePORTER_PRJ_C_FY1996.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1997 <- read_csv("RePORTER_PRJ_C_FY1997.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1998 <- read_csv("RePORTER_PRJ_C_FY1998.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY1999 <- read_csv("RePORTER_PRJ_C_FY1999.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2000 <- read_csv("RePORTER_PRJ_C_FY2000.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2001 <- read_csv("RePORTER_PRJ_C_FY2001.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2002 <- read_csv("RePORTER_PRJ_C_FY2002.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2003 <- read_csv("RePORTER_PRJ_C_FY2003.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2004 <- read_csv("RePORTER_PRJ_C_FY2004.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2005 <- read_csv("RePORTER_PRJ_C_FY2005.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2006 <- read_csv("RePORTER_PRJ_C_FY2006.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2007 <- read_csv("RePORTER_PRJ_C_FY2007.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2008 <- read_csv("RePORTER_PRJ_C_FY2008.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2009 <- read_csv("RePORTER_PRJ_C_FY2009.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2010 <- read_csv("RePORTER_PRJ_C_FY2010.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2011 <- read_csv("RePORTER_PRJ_C_FY2011.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2012 <- read_csv("RePORTER_PRJ_C_FY2012.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2013 <- read_csv("RePORTER_PRJ_C_FY2013.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2014 <- read_csv("RePORTER_PRJ_C_FY2014.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2015 <- read_csv("RePORTER_PRJ_C_FY2015.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2016 <- read_csv("RePORTER_PRJ_C_FY2016.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2017 <- read_csv("RePORTER_PRJ_C_FY2017.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2018 <- read_csv("RePORTER_PRJ_C_FY2018.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2019 <- read_csv("RePORTER_PRJ_C_FY2019.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2020 <- read_csv("RePORTER_PRJ_C_FY2020.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2021 <- read_csv("RePORTER_PRJ_C_FY2021.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2022 <- read_csv("RePORTER_PRJ_C_FY2022.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2023 <- read_csv("RePORTER_PRJ_C_FY2023.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2024 <- read_csv("RePORTER_PRJ_C_FY2024.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+RePORTER_PRJ_C_FY2025 <- read_csv("RePORTER_PRJ_C_FY2025.csv") %>% clean_names() %>%
+  select(activity, administering_ic, core_project_num, ic_name)
+
+# Bring together all projects and then identify those that are NIH
+
+all_projects<-bind_rows(
+  RePORTER_PRJ_C_FY1985, RePORTER_PRJ_C_FY1986, RePORTER_PRJ_C_FY1987, RePORTER_PRJ_C_FY1988, RePORTER_PRJ_C_FY1989,
+  RePORTER_PRJ_C_FY1990, RePORTER_PRJ_C_FY1991, RePORTER_PRJ_C_FY1992, RePORTER_PRJ_C_FY1993, RePORTER_PRJ_C_FY1994,
+  RePORTER_PRJ_C_FY1995, RePORTER_PRJ_C_FY1996, RePORTER_PRJ_C_FY1997, RePORTER_PRJ_C_FY1998, RePORTER_PRJ_C_FY1999,
+  RePORTER_PRJ_C_FY2000, RePORTER_PRJ_C_FY2001, RePORTER_PRJ_C_FY2002, RePORTER_PRJ_C_FY2003, RePORTER_PRJ_C_FY2004,
+  RePORTER_PRJ_C_FY2005, RePORTER_PRJ_C_FY2006, RePORTER_PRJ_C_FY2007, RePORTER_PRJ_C_FY2008, RePORTER_PRJ_C_FY2009,
+  RePORTER_PRJ_C_FY2010, RePORTER_PRJ_C_FY2011, RePORTER_PRJ_C_FY2012, RePORTER_PRJ_C_FY2013, RePORTER_PRJ_C_FY2014,
+  RePORTER_PRJ_C_FY2015, RePORTER_PRJ_C_FY2016, RePORTER_PRJ_C_FY2017, RePORTER_PRJ_C_FY2018, RePORTER_PRJ_C_FY2019,
+  RePORTER_PRJ_C_FY2020, RePORTER_PRJ_C_FY2021, RePORTER_PRJ_C_FY2022, RePORTER_PRJ_C_FY2023, RePORTER_PRJ_C_FY2024,
+  RePORTER_PRJ_C_FY2025
+) %>% distinct()
+
+# Make a table of ic names and abbreviations
+# I went through these manually to make sure I was pulling out only those from NIH (not FDA, VA, AHRQ, etc)
+# Besides the IC abbreviations (e.g. CA for NCI and HL for NHLBI) some of these are NIH intrmaural units
+
+ic_table <- all_projects %>% select(administering_ic, ic_name) %>%
+  distinct() %>% arrange(administering_ic)
+
+write.csv(ic_table, "ic_table.csv", row.names = FALSE)
+
+# Isolate the NIH projects (i.e., not projects from AHRQ, VA, CDC, FDA ...)
+
+nih_projects <- all_projects %>%
+  filter(administering_ic %in% 
+           c("RR","TW","AT","CA","EY","HG","HL","HG","AG","AA",
+             "AI","AR","EB","HD","DA","DC","DE","DK","ES","GM",
+             "MH","MD","NS","NR","LM","OD","TR","AO","BC","BU",
+             "CL","CM","CN","CP","CT","HB","HC","HO","HR","HV",
+             "NU","PC","RG","RS","SC","WH")) %>%
+  select(core_project_num) %>% distinct() %>%
+  rename(project_number = core_project_num)
+
+# Next pull all project numbers from publink files from 1980 to 1984 and assume that all
+# these are NIH projects
+
+RePORTER_PUBLNK_C_1984 <- read_csv("RePORTER_PUBLNK_C_1984.csv") %>% clean_names %>%
+  select(project_number) %>% distinct()
+
+RePORTER_PUBLNK_C_1983 <- read_csv("RePORTER_PUBLNK_C_1983.csv") %>% clean_names %>%
+  select(project_number) %>% distinct()
+
+RePORTER_PUBLNK_C_1982 <- read_csv("RePORTER_PUBLNK_C_1982.csv") %>% clean_names %>%
+  select(project_number) %>% distinct()
+
+RePORTER_PUBLNK_C_1981 <- read_csv("RePORTER_PUBLNK_C_1981.csv") %>% clean_names %>%
+  select(project_number) %>% distinct()
+
+RePORTER_PUBLNK_C_1980 <- read_csv("RePORTER_PUBLNK_C_1980.csv") %>% clean_names %>%
+  select(project_number) %>% distinct()
+
+nih_projects_1980_1984 <- bind_rows(RePORTER_PUBLNK_C_1980, RePORTER_PUBLNK_C_1981,
+                                    RePORTER_PUBLNK_C_1982, RePORTER_PUBLNK_C_1983, RePORTER_PUBLNK_C_1984) %>%
+  distinct()
+
+nih_projects_use <- bind_rows(nih_projects, nih_projects_1980_1984) %>%
+  distinct()
+
+# Now list of PMIDs along with project numbers from the ExPORTER publink files
+
+RePORTER_PUBLNK_C_FY2025 <- read_csv("RePORTER_PUBLNK_C_FY2025.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_FY2024 <- read_csv("RePORTER_PUBLNK_C_FY2024.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_FY2023 <- read_csv("RePORTER_PUBLNK_C_FY2023.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_FY2022 <- read_csv("RePORTER_PUBLNK_C_FY2022.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2021 <- read_csv("RePORTER_PUBLNK_C_2021.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2020 <- read_csv("RePORTER_PUBLNK_C_2020.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2019 <- read_csv("RePORTER_PUBLNK_C_2019.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2018 <- read_csv("RePORTER_PUBLNK_C_2018.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2017 <- read_csv("RePORTER_PUBLNK_C_2017.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2016 <- read_csv("RePORTER_PUBLNK_C_2016.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2015 <- read_csv("RePORTER_PUBLNK_C_2015.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2014 <- read_csv("RePORTER_PUBLNK_C_2014.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2013 <- read_csv("RePORTER_PUBLNK_C_2013.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2012 <- read_csv("RePORTER_PUBLNK_C_2012.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2011 <- read_csv("RePORTER_PUBLNK_C_2011.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_2010 <- read_csv("RePORTER_PUBLNK_C_2010.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2009 <- read_csv("RePORTER_PUBLNK_C_2009.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2008 <- read_csv("RePORTER_PUBLNK_C_2008.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2007 <- read_csv("RePORTER_PUBLNK_C_2007.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2006 <- read_csv("RePORTER_PUBLNK_C_2006.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_2005 <- read_csv("RePORTER_PUBLNK_C_2005.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2004 <- read_csv("RePORTER_PUBLNK_C_2004.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2003 <- read_csv("RePORTER_PUBLNK_C_2003.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2002 <- read_csv("RePORTER_PUBLNK_C_2002.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_2001 <- read_csv("RePORTER_PUBLNK_C_2001.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_2000 <- read_csv("RePORTER_PUBLNK_C_2000.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1999 <- read_csv("RePORTER_PUBLNK_C_1999.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1998 <- read_csv("RePORTER_PUBLNK_C_1998.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1997 <- read_csv("RePORTER_PUBLNK_C_1997.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1996 <- read_csv("RePORTER_PUBLNK_C_1996.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_1995 <- read_csv("RePORTER_PUBLNK_C_1995.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1994 <- read_csv("RePORTER_PUBLNK_C_1994.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1993 <- read_csv("RePORTER_PUBLNK_C_1993.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1992 <- read_csv("RePORTER_PUBLNK_C_1992.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1991 <- read_csv("RePORTER_PUBLNK_C_1991.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_1990 <- read_csv("RePORTER_PUBLNK_C_1990.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1989 <- read_csv("RePORTER_PUBLNK_C_1989.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1988 <- read_csv("RePORTER_PUBLNK_C_1988.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1987 <- read_csv("RePORTER_PUBLNK_C_1987.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1986 <- read_csv("RePORTER_PUBLNK_C_1986.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_1985 <- read_csv("RePORTER_PUBLNK_C_1985.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1984 <- read_csv("RePORTER_PUBLNK_C_1984.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1983 <- read_csv("RePORTER_PUBLNK_C_1983.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1982 <- read_csv("RePORTER_PUBLNK_C_1982.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+RePORTER_PUBLNK_C_1981 <- read_csv("RePORTER_PUBLNK_C_1981.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+
+RePORTER_PUBLNK_C_1980 <- read_csv("RePORTER_PUBLNK_C_1980.csv") %>% clean_names %>%
+  select(project_number, pmid) %>% distinct()
+
+all_pmids<-bind_rows(
+  RePORTER_PUBLNK_C_1980, RePORTER_PUBLNK_C_1981, RePORTER_PUBLNK_C_1982, RePORTER_PUBLNK_C_1983, RePORTER_PUBLNK_C_1984,
+  RePORTER_PUBLNK_C_1985, RePORTER_PUBLNK_C_1986, RePORTER_PUBLNK_C_1987, RePORTER_PUBLNK_C_1988, RePORTER_PUBLNK_C_1989,
+  RePORTER_PUBLNK_C_1990, RePORTER_PUBLNK_C_1991, RePORTER_PUBLNK_C_1992, RePORTER_PUBLNK_C_1993, RePORTER_PUBLNK_C_1994,
+  RePORTER_PUBLNK_C_1995, RePORTER_PUBLNK_C_1996, RePORTER_PUBLNK_C_1997, RePORTER_PUBLNK_C_1998, RePORTER_PUBLNK_C_1999,
+  RePORTER_PUBLNK_C_2000, RePORTER_PUBLNK_C_2001, RePORTER_PUBLNK_C_2002, RePORTER_PUBLNK_C_2003, RePORTER_PUBLNK_C_2004,
+  RePORTER_PUBLNK_C_2005, RePORTER_PUBLNK_C_2006, RePORTER_PUBLNK_C_2007, RePORTER_PUBLNK_C_2008, RePORTER_PUBLNK_C_2009,
+  RePORTER_PUBLNK_C_2010, RePORTER_PUBLNK_C_2011, RePORTER_PUBLNK_C_2012, RePORTER_PUBLNK_C_2013, RePORTER_PUBLNK_C_2014,
+  RePORTER_PUBLNK_C_2015, RePORTER_PUBLNK_C_2016, RePORTER_PUBLNK_C_2017, RePORTER_PUBLNK_C_2018, RePORTER_PUBLNK_C_2019,
+  RePORTER_PUBLNK_C_2020, RePORTER_PUBLNK_C_2021, RePORTER_PUBLNK_C_FY2022, RePORTER_PUBLNK_C_FY2023, RePORTER_PUBLNK_C_FY2024,
+  RePORTER_PUBLNK_C_FY2025
+) %>% distinct()
+
+# Now left_join NIH project numbers to the PMIDs
+
+nih_project_pmids <- nih_projects_use %>% left_join(all_pmids) %>% distinct() %>%
+  filter(!is.na(pmid)) %>%
+  select(pmid) %>% distinct() %>%
+  mutate(funding_NIH=1)
+
+# Save result in .RData and .parquet formats
+
+save(nih_project_pmids, file="NIH_pmids_6_11_26.RData")
+write_parquet(nih_project_pmids, "NIH_pmids_6_11_26.parquet")
+
+
+```
+
+
+```{r cleanup, include=FALSE}
+dbDisconnect(con, shutdown = TRUE)
+```
